@@ -1,4 +1,4 @@
-# 6주차 실습: KFP로 만드는 경량 MLOps 파이프라인
+# 6주차 실습: KFP로 만드는 MLOps 파이프라인
 
 > 「AI플랫폼 06. MLOps 파이프라인 구축 실습」 강의자료 연계 실습서
 > 대상: KFP v2 백엔드가 설치된 Kubeflow 환경 / GPU 불필요
@@ -89,7 +89,7 @@ kubectl port-forward -n istio-system svc/istio-ingressgateway 8080:80
 ykkim77/kfp-notebook:py310-kfp250-v1
 ```
 
-5. CPU 요청 0.5코어, 메모리 요청 1Gi, GPU 없음으로 설정함
+5. CPU 요청 1코어, 메모리 요청 1Gi, GPU 없음으로 설정함
 6. 사용자별 Workspace PVC를 연결하고 Notebook 생성함
 7. Ready 상태 확인 후 CONNECT로 JupyterLab 접속함
 8. Launcher에서 `Python 3.10 - KFP 2.5.0` 커널을 선택하여 새 Notebook 생성함
@@ -652,69 +652,8 @@ kubectl top pods -n USER_NAMESPACE
 
 ## 13. 수업 운영 시 설치 비용 줄이기
 
-기본 예제는 Docker 빌드 없이 시작하도록 lightweight Python component를 사용함. 다만 각 단계에서 패키지 설치가 반복되므로 다수 학생이 함께 실행하면 네트워크·설치 비용이 생김.
 
-교수자 사전 준비 시 다음 패키지를 포함한 공통 이미지를 한 번 빌드하여 배포 가능함:
 
-```dockerfile
-FROM python:3.10-slim
-RUN python -m pip install --no-cache-dir \
-    kfp==2.5.0 numpy==1.26.4 scipy==1.13.1 \
-    scikit-learn==1.5.2 joblib==1.4.2 threadpoolctl==3.5.0
-```
-
-세 컴포넌트의 데코레이터를 다음 구조로 변경함:
-
-```python
-@dsl.component(
-    base_image="YOUR_REGISTRY/kfp-iris:lab-v1",
-    install_kfp_package=False,
-)
-def preprocess():  # 실제 적용 시 기존 함수의 인자와 본문 유지
-    pass
-```
-
-- `YOUR_REGISTRY`는 클러스터가 접근할 수 있는 실제 레지스트리로 변경함
-- packages_to_install을 제거하고 공통 이미지 안의 패키지 사용함
-- 이미지 빌드·업로드 후 YAML 재컴파일·업로드함
-- 단계별 패키지 설치를 없애고 노드 이미지 캐시를 활용할 수 있음
-- 초기 이미지 다운로드는 여전히 필요함
-- 장기 운영에서는 이미지 태그뿐 아니라 digest까지 고정하는 방법 검토함
-- 기본 학습 예제를 완료하기 위해 이 절차가 필수인 것은 아님
-
-## 14. 제출 및 점검
-
-제출물:
-
-1. `iris_pipeline.py`, `iris_pipeline.yaml`
-2. A·B·C Run의 완료 화면 또는 실행 식별 정보
-3. Experiment의 Run 비교 화면 캡처와 작성한 Run 비교표
-4. 다음 질문에 대한 짧은 답변
-
-점검 질문:
-
-- 파라미터와 아티팩트의 차이는 무엇이며, 이 코드의 예시는 무엇인가?
-- 각 단계가 다른 컨테이너인데 Dataset과 Model을 어떻게 주고받는가?
-- 전체 데이터를 먼저 정규화한 뒤 분할하면 어떤 문제가 생기는가?
-- 트리 수를 늘렸는데 accuracy가 같다면 무엇을 추가 비교할 수 있는가?
-- Succeeded와 quality_pass=1은 어떻게 다른가?
-- 이 실습에서 구현한 MLOps 요소와 아직 구현하지 않은 운영 요소는 무엇인가?
-
-교수자 확인 기준:
-
-- 단계별 코드와 입출력 연결이 올바르게 정의됨
-- 동일 분할에서 한 번에 하나의 하이퍼파라미터를 변경함
-- accuracy뿐 아니라 F1·학습 시간·모델 크기를 비교함
-- 성능 차이가 없거나 성능이 감소해도 그 이유와 한계를 해석함
-- 재현성·데이터 누수·품질 기준·캐시 개념을 구분함
-
-## 15. 정리 및 참고
-
-- 실습 완료 후 진행 중인 Run이 없는지 확인함
-- 불필요한 Notebook은 종료함
-- 결과 기록 전 Experiment나 아티팩트 저장소를 삭제하지 않음
-- Run 삭제 또는 보관만으로 모든 저장소 파일이 자동 삭제된다고 가정하지 않음
-- 공용 클러스터의 PVC·namespace·플랫폼 서비스는 학생이 임의 삭제하지 않음
 
 공식 참고 문서:
 
