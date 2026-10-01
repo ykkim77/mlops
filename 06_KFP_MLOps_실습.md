@@ -1,8 +1,9 @@
-# 6주차 실습: KFP로 만드는 MLOps 파이프라인
+# 6주차 실습: KFP로 만드는 경량 MLOps 파이프라인
 
-> 「AI플랫폼 06. MLOps 파이프라인 구축 실습」 강의자료 
+> 「AI플랫폼 06. MLOps 파이프라인 구축 실습」 강의자료 연계 실습서
 > 대상: KFP v2 백엔드가 설치된 Kubeflow 환경 / GPU 불필요
-> 문서의 명령은 Ubuntu 또는 Windows Terminal의 WSL Ubuntu에서 실행함
+> 작성·컴파일 환경: Kubeflow Notebook의 `ykkim77/kfp-notebook:py310-kfp250-v1` 이미지 사용
+> 기본 비교 방식: 같은 Experiment에 Run을 모아 Kubeflow UI에서 비교함
 
 ## 1. 실습 목표와 범위
 
@@ -22,8 +23,8 @@
 | 기본 분할 | 학습 105개 / 평가 45개, 계층화 분할 |
 | 모델 | RandomForestClassifier, CPU 한 스레드 |
 | 단계 | preprocess → train → evaluate |
-| 핵심 실행 | A·B·C 3개 Run을 순차 실행 |
-| 확장 실행 | D: 재현성 확인 / E: 품질 기준 미달 확인 |
+| 핵심 실행 | 같은 Experiment에서 A·B·C 3개 Run을 순차 실행 |
+| 확장 실행 | D: 재현성 / E: 품질 기준 / F·G: 데이터 분할 비교 |
 | 단계별 사용자 컨테이너 요청 | CPU 100m, 메모리 256Mi |
 | 단계별 사용자 컨테이너 상한 | CPU 1코어, 메모리 1Gi |
 | 별도 도입 서비스 | 없음: MLflow·Katib·KServe·분산학습 미사용 |
@@ -77,43 +78,67 @@ kubectl port-forward -n istio-system svc/istio-ingressgateway 8080:80
 
 브라우저: <http://localhost:8080>. 원격 서버라면 로컬 PC에서 SSH 터널을 연결함. 이미 사용 가능한 대시보드 주소가 있으면 그 주소를 사용함.
 
-### 4.2. Python 가상환경
+### 4.2. 커스텀 Notebook 생성
 
-본 예제의 검증 조합은 Python 3.10 계열 컨테이너와 KFP SDK 2.5.0임. 로컬 작성 환경은 Python 3.9~3.11 권장. SDK 2.5.0은 예제의 재현성을 위한 고정 버전이며 최신 버전이라는 의미가 아님. 실제 백엔드 버전과 운영 정책에 따라 조정 시 재컴파일·검증 필요.
+1. Kubeflow 대시보드에서 자신의 사용자 namespace 선택함
+2. Notebooks → New Notebook 또는 New Server 선택함
+3. Notebook 이름을 `mlops-lab`으로 지정함
+4. 이미지 항목에서 Custom image 선택 후 아래 주소 입력함
 
-```bash
-python3 --version
-mkdir -p ~/kfp-iris-lab
-cd ~/kfp-iris-lab
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install kfp==2.5.0
-python -c "import kfp; print(kfp.__version__)"
+```text
+ykkim77/kfp-notebook:py310-kfp250-v1
 ```
 
-`venv`가 없다는 오류가 발생하면 Ubuntu 환경에서 설치 후 다시 실행함:
+5. CPU 요청 0.5코어, 메모리 요청 1Gi, GPU 없음으로 설정함
+6. 사용자별 Workspace PVC를 연결하고 Notebook 생성함
+7. Ready 상태 확인 후 CONNECT로 JupyterLab 접속함
+8. Launcher에서 `Python 3.10 - KFP 2.5.0` 커널을 선택하여 새 Notebook 생성함
+9. 파일명을 `00_environment_check.ipynb`로 변경하고 다음 셀 실행함
 
-```bash
-sudo apt-get update
-sudo apt-get install -y python3-venv
+```python
+# 현재 Notebook 커널의 Python 및 KFP 버전 확인함
+import sys
+import kfp
+
+print("Python:", sys.version)
+print("KFP:", kfp.__version__)
+assert sys.version_info[:2] == (3, 10), "Python 3.10 커널 선택 여부 확인"
+assert kfp.__version__ == "2.5.0", "지정한 커스텀 이미지 사용 여부 확인"
 ```
 
-- 로컬 PC는 코드 작성과 YAML 컴파일을 담당함
-- 학습 패키지는 아래 `packages_to_install`에 따라 각 작업 컨테이너에 설치됨
-- 로컬에서 scikit-learn을 설치하는 것만으로 클러스터의 작업 컨테이너에 설치되지는 않음
-- IDE에서 새 파일 `iris_pipeline.py`를 생성하고 다음 전체 코드를 복사함
-- Ubuntu 터미널 편집 시 `nano iris_pipeline.py` 사용 가능. 저장은 Ctrl+O → Enter, 종료는 Ctrl+X
+- 커스텀 이미지에 실습 패키지가 포함되어 있으므로 별도 패키지 설치 과정 불필요
+- JupyterLab의 Terminal에서 `mkdir -p ~/work/kfp-iris-lab` 실행함
+- 파일 브라우저에서 `work/kfp-iris-lab` 폴더로 이동함
+- File → New → Text File로 새 파일을 만들고 `iris_pipeline.py`로 이름 변경함
+- 아래 전체 코드를 붙여넣고 Ctrl+S로 저장함
+- `.ipynb`는 환경 확인용, `.py`는 KFP 컴포넌트 정의 및 컴파일용으로 사용함
+- XSRF cookie 오류 발생 시 시크릿 창에서 재접속하여 확인하고 기존 접속 주소의 사이트 쿠키 정리함
+
+### 4.3. Notebook 이미지와 파이프라인 작업 이미지 구분
+
+| 구분 | 이미지 | 역할 |
+|---|---|---|
+| Notebook | `ykkim77/kfp-notebook:py310-kfp250-v1` | 코드 작성·버전 확인·YAML 컴파일 |
+| 각 파이프라인 작업 | 코드에 지정한 `python:3.10-slim` | 전처리·학습·평가 실행 |
+
+- Notebook에 설치된 패키지가 다른 작업 Pod에 자동 전달되는 것은 아님
+- 기존 실행 성공 코드의 `base_image`와 `packages_to_install`을 유지함
+- 작업 Pod에서 기본 이미지 다운로드와 PyPI 패키지 설치가 가능해야 함
 
 ## 5. 전체 파이프라인 코드
 
 파일명: `iris_pipeline.py`
 
 ```python
+# compiler: Python 파이프라인을 YAML로 변환함
+# dsl: 컴포넌트·파이프라인 정의 기능 제공함
 from kfp import compiler, dsl
+# Input·Output: 아티팩트 입출력 방향을 표시하는 KFP 타입임
+# Dataset·Model 등: 아티팩트의 논리적 종류이며 파일 형식을 강제하지 않음
 from kfp.dsl import Input, Output, Dataset, Model, Metrics, ClassificationMetrics
 
 # 컴포넌트 내부에서 사용하는 패키지는 컨테이너에도 설치되어야 함
+# 버전 고정으로 작업 컨테이너의 라이브러리 환경 통일함
 PACKAGES = [
     "numpy==1.26.4", "scipy==1.13.1", "scikit-learn==1.5.2",
     "joblib==1.4.2", "threadpoolctl==3.5.0",
@@ -121,10 +146,15 @@ PACKAGES = [
 
 
 @dsl.component(base_image="python:3.10-slim", packages_to_install=PACKAGES)
+# 전처리 컴포넌트 정의함. 실제 함수 본문은 Run의 작업 컨테이너에서 실행됨
 def preprocess(
+    # 평가 데이터 비율을 숫자 파라미터로 입력받음
     test_size: float,
+    # 난수 시드를 숫자 파라미터로 입력받음
     random_state: int,
+    # 학습 데이터의 출력 아티팩트 선언함. 객체와 저장 경로는 KFP가 제공함
     train_data: Output[Dataset],
+    # 평가 데이터의 출력 아티팩트 선언함
     test_data: Output[Dataset],
 ):
     import os
@@ -135,23 +165,33 @@ def preprocess(
 
     if not 0.1 <= test_size <= 0.5:
         raise ValueError("test_size는 0.1~0.5 범위로 지정")
+    # 패키지에 포함된 150개 Iris 샘플을 읽음. 별도 데이터 다운로드 불필요
     iris = load_iris()
+    # X는 특성값, y는 정답 클래스임
+    # stratify로 학습·평가 데이터의 클래스 비율 유지함
     x_train, x_test, y_train, y_test = train_test_split(
         iris.data, iris.target, test_size=test_size,
         random_state=random_state, stratify=iris.target,
     )
     # 반드시 분할 후 학습 데이터에서만 평균/표준편차 학습: 데이터 누수 방지
+    # 특성별 평균 0·표준편차 1로 변환할 정규화 객체 생성함
     scaler = StandardScaler()
+    # 학습 데이터만 사용해 평균·표준편차를 구하고 변환함
     x_train = scaler.fit_transform(x_train)
+    # 평가 데이터는 학습에서 얻은 통계로만 변환함
     x_test = scaler.transform(x_test)
+    # 학습·평가 결과를 각각의 출력 파일로 저장함
     for artifact, x, y in [(train_data, x_train, y_train), (test_data, x_test, y_test)]:
+        # KFP가 제공한 아티팩트 저장 경로의 부모 폴더 생성함
         os.makedirs(os.path.dirname(artifact.path), exist_ok=True)
         # 파일 객체 사용: np.savez가 .npz 확장자를 자동 추가하는 문제 방지
         with open(artifact.path, "wb") as f:
+            # 배열·정규화 통계·클래스 이름을 압축된 NumPy 형식으로 저장함
             np.savez_compressed(
                 f, X=x, y=y, mean=scaler.mean_, scale=scaler.scale_,
                 labels=np.array(iris.target_names),
             )
+        # 데이터의 출처·크기·분할 설정을 메타데이터로 기록함
         artifact.metadata.update({
             "dataset": "sklearn-iris", "rows": int(len(y)),
             "features": 4, "random_state": random_state,
@@ -161,11 +201,18 @@ def preprocess(
 
 
 @dsl.component(base_image="python:3.10-slim", packages_to_install=PACKAGES)
+# 학습 컴포넌트 정의함. Dataset을 받아 Model을 출력함
 def train(
+    # 전처리 작업이 만든 학습 데이터 아티팩트를 입력받음
     train_data: Input[Dataset],
+    # RandomForest 트리 수를 입력받음
     n_estimators: int,
+    # 각 트리의 최대 깊이를 입력받음
     max_depth: int,
+    # 난수 시드를 숫자 파라미터로 입력받음
     random_state: int,
+    # 모델 출력 아티팩트 선언함. model은 자유롭게 정하는 인자 이름임
+    # model2로 변경 시 함수 내부 참조와 fitted.outputs의 키도 변경해야 함
     model: Output[Model],
 ):
     import os
@@ -174,30 +221,40 @@ def train(
     import joblib
     from sklearn.ensemble import RandomForestClassifier
 
+    # 실습 중 과도한 자원 사용을 방지하도록 파라미터 범위 제한함
     if not 1 <= n_estimators <= 100:
         raise ValueError("경량 실습을 위해 n_estimators는 1~100으로 제한")
     if not 1 <= max_depth <= 10:
         raise ValueError("max_depth는 1~10으로 제한")
+    # 입력 아티팩트 경로에서 전처리된 배열을 읽음
     with np.load(train_data.path, allow_pickle=False) as data:
         x, y = data["X"], data["y"]
         mean, scale = data["mean"], data["scale"]
         labels = data["labels"].tolist()
+    # 실제 머신러닝 모델 객체를 생성함. 이 시점에는 아직 학습되지 않음
+    # n_jobs=1로 학습에 사용하는 병렬 작업 수 제한함
     classifier = RandomForestClassifier(
         n_estimators=n_estimators, max_depth=max_depth,
         random_state=random_state, n_jobs=1,
     )
+    # 학습 연산 시간 측정을 시작함. 설치·Pod 대기 시간은 포함하지 않음
     start = time.perf_counter()
+    # 학습 특성 x와 정답 y로 모델 학습함
     classifier.fit(x, y)
     fit_seconds = time.perf_counter() - start
     # 추론에서도 동일 전처리를 재사용할 수 있도록 통계와 모델을 함께 보관
+    # 학습한 모델과 정규화 통계 및 실험 정보를 하나의 묶음으로 구성함
     bundle = {
         "classifier": classifier, "scaler_mean": mean, "scaler_scale": scale,
         "labels": labels, "fit_seconds": fit_seconds,
         "n_estimators": n_estimators, "max_depth": max_depth,
         "random_state": random_state,
     }
+    # 모델 산출물 저장 폴더 생성함
     os.makedirs(os.path.dirname(model.path), exist_ok=True)
+    # 학습 모델 묶음을 파일로 저장함. Output[Model] 선언만으로 저장되지는 않음
     joblib.dump(bundle, model.path)
+    # 알고리즘·하이퍼파라미터·라이브러리 버전을 모델 메타데이터에 기록함
     model.metadata.update({
         "algorithm": "RandomForestClassifier", "n_estimators": n_estimators,
         "max_depth": max_depth, "random_state": random_state,
@@ -207,13 +264,21 @@ def train(
 
 
 @dsl.component(base_image="python:3.10-slim", packages_to_install=PACKAGES)
+# 평가 컴포넌트 정의함. 모델과 평가 데이터를 입력받아 지표를 출력함
 def evaluate(
+    # 학습 작업이 저장한 모델 아티팩트를 입력받음
     model: Input[Model],
+    # 전처리 작업이 저장한 평가 데이터 아티팩트를 입력받음
     test_data: Input[Dataset],
+    # 품질 통과 여부를 판단할 최소 정확도 입력받음
     min_accuracy: float,
+    # Run 비교에 사용할 숫자 지표 출력 선언함
     metrics: Output[Metrics],
+    # 분류 결과를 시각화할 혼동행렬 출력 선언함
     confusion: Output[ClassificationMetrics],
+    # 보조 JSON 결과 파일 출력 선언함. 본 실습의 비교는 대시보드에서 수행함
     report: Output[Dataset],
+# bool 반환값은 품질 통과 여부이며 파일 아티팩트가 아닌 출력 파라미터임
 ) -> bool:
     import json
     import os
@@ -223,14 +288,20 @@ def evaluate(
 
     if not 0.0 <= min_accuracy <= 1.0:
         raise ValueError("min_accuracy는 0~1 범위로 지정")
+    # 신뢰할 수 있는 실습 모델 파일을 읽어 모델 객체 복원함
     bundle = joblib.load(model.path)
     with np.load(test_data.path, allow_pickle=False) as data:
         x, y = data["X"], data["y"]
     # x는 preprocess 단계에서 이미 정규화됨: 다시 정규화하지 않음
+    # 정답을 알려주지 않고 평가 특성값으로 클래스를 예측함
     predicted = bundle["classifier"].predict(x)
+    # 전체 샘플 중 정답 비율 계산함
     accuracy = float(accuracy_score(y, predicted))
+    # 각 클래스의 F1 점수를 같은 비중으로 평균함
     macro_f1 = float(f1_score(y, predicted, average="macro", zero_division=0))
+    # 실행 성공과 별개로 모델 품질 기준 통과 여부 판단함
     passed = accuracy >= min_accuracy
+    # 성능·학습 시간·파일 크기·설정값을 비교용 지표로 모음
     values = {
         "accuracy": accuracy,
         "macro_f1": macro_f1,
@@ -241,10 +312,16 @@ def evaluate(
         "max_depth": int(bundle["max_depth"]),
         "quality_pass": int(passed),
     }
+    # 모든 Run에서 동일한 지표 이름을 사용하여 비교 가능하도록 기록함
     for name, value in values.items():
+        # Metrics 아티팩트의 메타데이터에 숫자 지표 기록함
         metrics.log_metric(name, float(value))
+    # 행=실제 클래스, 열=예측 클래스인 혼동행렬 생성함
+    # Iris 클래스 번호 0·1·2를 사용함
     matrix = confusion_matrix(y, predicted, labels=[0, 1, 2])
+    # 클래스 이름과 행렬을 UI 시각화용으로 기록함
     confusion.log_confusion_matrix(bundle["labels"], matrix.tolist())
+    # 결과와 실험 조건을 보조 보고서로 구성함
     result = {
         "metrics": values, "min_accuracy": min_accuracy,
         "random_state": bundle["random_state"],
@@ -254,32 +331,47 @@ def evaluate(
     with open(report.path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     report.metadata["format"] = "json"
+    # Run 상세 화면의 Logs 탭에서도 결과 확인 가능하도록 출력함
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    # 품질 미달이어도 예외를 발생시키지 않으므로 Run은 정상 완료 가능함
     return passed
 
 
+# 파이프라인 함수 등록함. 이 함수를 컴파일하여 DAG 생성함
 @dsl.pipeline(name="iris-mlops-light", description="Iris 전처리-학습-평가 및 Run 메트릭 비교")
 def iris_pipeline(
+    # Run 생성 UI에서 변경할 수 있는 기본 파라미터 정의함
     n_estimators: int = 10,
     max_depth: int = 2,
     test_size: float = 0.3,
     random_state: int = 42,
     min_accuracy: float = 0.9,
 ):
+    # 전처리 작업 객체를 생성하고 prep으로 참조함. 여기서 즉시 전처리하지 않음
+    # 입력값이 Run 파라미터뿐이며 선행 작업 의존성이 없어 시작 작업이 됨
     prep = preprocess(test_size=test_size, random_state=random_state)
+    # prep의 학습 출력을 train 입력으로 연결함 → prep 완료 후 train 실행됨
+    # 같은 인자 이름이라 자동 연결되는 것이 아니라 outputs 참조로 명시 연결함
     fitted = train(
         train_data=prep.outputs["train_data"], n_estimators=n_estimators,
         max_depth=max_depth, random_state=random_state,
     )
+    # fitted의 모델과 prep의 평가 데이터를 연결함 → 둘의 결과 준비 후 평가 실행됨
     evaluated = evaluate(
         model=fitted.outputs["model"], test_data=prep.outputs["test_data"],
         min_accuracy=min_accuracy,
     )
+    # 세 작업에 동일한 설정 적용함. 리스트 순서로 실행 순서를 지정하는 것은 아님
     for task in [prep, fitted, evaluated]:
+        # CPU 0.1코어 요청함. 사용량을 0.1코어로 고정하는 설정은 아님
         task.set_cpu_request("100m")
+        # CPU 사용 상한을 1코어로 설정함
         task.set_cpu_limit("1")
+        # 스케줄링 시 메모리 256Mi 요청함
         task.set_memory_request("256Mi")
+        # 패키지 설치를 고려해 메모리 상한 1Gi 설정함
         task.set_memory_limit("1Gi")
+        # 수치 계산 라이브러리의 스레드를 제한하여 자원 사용 억제함
         task.set_env_variable("OMP_NUM_THREADS", "1")
         task.set_env_variable("OPENBLAS_NUM_THREADS", "1")
         task.set_env_variable("MKL_NUM_THREADS", "1")
@@ -287,7 +379,9 @@ def iris_pipeline(
         task.set_caching_options(False)
 
 
+# 파일을 Python으로 직접 실행할 때 YAML 컴파일 수행함
 if __name__ == "__main__":
+    # 컴포넌트 본문을 실행하지 않고 작업 사양·입출력 연결을 YAML로 변환함
     compiler.Compiler().compile(
         pipeline_func=iris_pipeline, package_path="iris_pipeline.yaml",
     )
@@ -335,11 +429,23 @@ if __name__ == "__main__":
 
 ## 7. 컴파일 및 업로드
 
-가상환경을 활성화한 실습 폴더에서 실행함:
+JupyterLab의 Terminal에서 다음 명령 실행함:
 
 ```bash
+cd ~/work/kfp-iris-lab
 python iris_pipeline.py
 ls -lh iris_pipeline.yaml
+```
+
+Notebook 셀에서 실행할 경우 파일이 있는 폴더에서 다음 코드 사용함:
+
+```python
+# 현재 커널과 같은 Python으로 파일 실행함
+# 노트북의 현재 작업 폴더에 iris_pipeline.py가 있어야 함
+import subprocess
+import sys
+
+subprocess.run([sys.executable, "iris_pipeline.py"], check=True)
 ```
 
 예상 메시지:
@@ -357,19 +463,7 @@ iris_pipeline.yaml 생성 완료
 
 화면 명칭과 위치는 배포 버전에 따라 차이가 있을 수 있음. 별도 API 인증이나 쿠키 설정을 요구하지 않도록 기본 실습은 대시보드 업로드 방식으로 진행함.
 
-WSL에서 Windows 탐색기로 현재 폴더를 열 때:
-
-```bash
-explorer.exe .
-```
-
-서버에서 컴파일한 경우 로컬 PC 터미널의 파일 전송 예시:
-
-```bash
-scp user@SERVER:~/kfp-iris-lab/iris_pipeline.yaml .
-```
-
-`user`, `SERVER`는 실제 계정·주소로 변경함.
+JupyterLab 파일 브라우저에서 `iris_pipeline.yaml`을 우클릭하여 Download 선택함. 내려받은 파일을 Pipelines의 Upload pipeline에서 업로드함. Notebook과 다른 탭에서 대시보드를 열어 작업 가능함.
 
 ## 8. Run A·B·C 실행: 한 번에 하나의 조건 변경
 
@@ -381,11 +475,15 @@ scp user@SERVER:~/kfp-iris-lab/iris_pipeline.yaml .
 | iris-B-depth2 | 10 | 2 | A와 비교: 깊이만 변경 |
 | iris-C-trees30 | 30 | 2 | B와 비교: 트리 수만 변경 |
 
-1. A의 파라미터 입력 후 실행함
-2. DAG의 preprocess·train·evaluate가 Succeeded인지 확인함
-3. 메트릭과 평가 로그 확인함
-4. A 종료 후 B 실행함
-5. B 종료 후 C 실행함
+1. Pipelines에서 업로드한 `iris-mlops-light`와 동일한 버전을 선택함
+2. Create run에서 Run 이름 `iris-A-depth1`과 Experiment `iris-mlops-lab` 지정함
+3. Run 유형은 일회성으로 설정하고 표의 파라미터 및 고정값 모두 확인함
+4. A 실행 후 완료 상태 확인함
+5. 같은 Pipeline 버전으로 새 Run을 만들고 이름 `iris-B-depth2` 지정함
+6. Experiment는 반드시 기존 `iris-mlops-lab` 선택함. max_depth만 2로 변경함
+7. B 종료 후 같은 방법으로 `iris-C-trees30` 생성함. B 대비 n_estimators만 30으로 변경함
+
+각 Run에서 DAG의 preprocess·train·evaluate가 Succeeded인지 확인하고 메트릭 및 평가 로그 관찰함. 실행 중 캐시 설정을 별도로 선택할 수 있으면 기존 결과 재사용이 아닌 실제 실행으로 설정함.
 
 동일 코드에 하이퍼파라미터만 변경하는 경우 YAML을 다시 업로드할 필요 없음. 코드·패키지·자원 설정을 변경한 경우에는 재컴파일하고 새 Pipeline 버전을 업로드함.
 
@@ -411,7 +509,7 @@ UI에서 메트릭 카드나 표가 표시되지 않으면 metrics 아티팩트�
 3. Compare runs 또는 해당 버전의 비교 기능 선택
 4. Parameters에서 실제 입력한 `n_estimators`, `max_depth` 확인
 5. Metrics 영역에서 같은 이름의 메트릭을 나란히 비교
-6. 비교 화면이 해당 v2 아티팩트의 숫자를 집계하지 못하는 버전에서는 Run별 metrics metadata 또는 report JSON을 사용하여 아래 표 작성
+6. 비교 화면이 해당 v2 아티팩트의 숫자를 집계하지 못하는 버전에서는 Run 상세 UI에서 evaluate의 metrics 아티팩트 metadata 또는 Logs 탭을 열어 아래 표 작성
 
 | Run | 트리 수 | 깊이 | accuracy | macro_f1 | train_seconds | model_size_kib | quality_pass |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -449,55 +547,29 @@ UI에서 메트릭 카드나 표가 표시되지 않으면 metrics 아티팩트�
 
 이 예시에서는 복잡도를 늘려도 성능이 개선되지 않음. 작은 평가 집합의 단일 결과이므로 A가 모든 데이터에서 가장 좋은 모델이라고 일반화하지 않음.
 
-## 10. UI에 의존하지 않는 CSV 비교 방법
+## 10. 선택 실습: 데이터 분할 변경 후 결과 비교
 
-선택 실습이지만, UI의 비교 화면이 제한된 경우에도 Run별 비교를 완성할 수 있는 방법임.
+원본 Iris 데이터는 유지하고 `random_state`만 변경하여 학습·평가 샘플 구성을 바꿔 봄. 현재 코드에서는 같은 random_state가 모델 난수에도 사용되므로 결과 변화에는 데이터 분할과 모델 난수의 영향이 함께 포함됨.
 
-1. 각 Run의 report 아티팩트를 다운로드함
-2. 각각 `reports/iris-A-depth1.json`, `reports/iris-B-depth2.json`, `reports/iris-C-trees30.json`으로 저장함
-3. 다운로드 기능이 없으면 evaluate 로그의 JSON 객체만 복사하여 같은 파일명으로 저장함. 로그 시간·로그 접두어·기타 출력은 포함하지 않음
-4. 실습 폴더에 아래 코드를 `compare_reports.py`로 저장함
+| Run 이름 | n_estimators | max_depth | test_size | random_state | min_accuracy |
+|---|---:|---:|---:|---:|---:|
+| iris-B-depth2 | 10 | 2 | 0.3 | 42 | 0.9 |
+| iris-F-seed7 | 10 | 2 | 0.3 | 7 | 0.9 |
+| iris-G-seed21 | 10 | 2 | 0.3 | 21 | 0.9 |
 
-```python
-import csv
-import json
-from pathlib import Path
+- B는 기존 Run 재사용함. F·G만 추가로 순차 실행함
+- 모든 Run을 `iris-mlops-lab` Experiment에 생성함
+- Experiment에서 B·F·G를 선택하여 Parameters 및 Metrics 비교함
+- 같은 설정의 모델도 데이터 분할·난수에 따라 성능이 달라질 수 있음을 확인함
+- 모델 간 공정한 비교 시 각 모델에 동일한 시드 목록을 적용함
+- test_size 변경도 가능하지만 평가 샘플 수가 달라지므로 첫 하이퍼파라미터 비교에서는 고정함
+- 원본 데이터셋 자체를 변경하려면 preprocess 코드 수정과 재컴파일 필요함
 
-fields = [
-    "run", "n_estimators", "max_depth", "accuracy", "macro_f1",
-    "train_seconds", "model_size_kib", "test_samples", "quality_pass",
-]
-files = sorted(Path("reports").glob("*.json"))
-if not files:
-    raise SystemExit("reports 폴더에 Run별 JSON 보고서를 먼저 저장")
-rows = []
-for file in files:
-    result = json.loads(file.read_text(encoding="utf-8"))
-    rows.append({"run": file.stem, **result["metrics"]})
-with open("run_comparison.csv", "w", newline="", encoding="utf-8-sig") as f:
-    writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
-    writer.writeheader()
-    writer.writerows(rows)
-for row in rows:
-    print(
-        f'{row["run"]}: accuracy={row["accuracy"]:.4f}, '
-        f'F1={row["macro_f1"]:.4f}, '
-        f'fit={row["train_seconds"]:.6f}s, '
-        f'size={row["model_size_kib"]:.2f}KiB, '
-        f'pass={row["quality_pass"]}'
-    )
-print("run_comparison.csv 생성 완료")
-```
-
-실행함:
-
-```bash
-mkdir -p reports
-# 위 폴더에 Run별 JSON 저장 후 실행
-python compare_reports.py
-```
-
-생성된 `run_comparison.csv`를 Excel 등에서 열어 Run별 값 비교 가능. 별도 pandas나 MLflow 설치 불필요.
+| Run | random_state | test_samples | accuracy | macro_f1 | 관찰 내용 |
+|---|---:|---:|---:|---:|---|
+| B | 42 | 45 | | | |
+| F | 7 | 45 | | | |
+| G | 21 | 45 | | | |
 
 ## 11. 확장 실습: 재현성·품질 기준·캐시
 
@@ -572,7 +644,7 @@ kubectl top pods -n USER_NAMESPACE
 | OOMKilled | 설치 단계인지 학습 단계인지 확인. 필요 시 해당 작업 메모리 상한만 2Gi로 변경 |
 | Dataset 파일 없음 | .path에 정확히 저장했는지 확인. NumPy 확장자 자동 추가를 피하는 본문 코드 사용 |
 | 401·403·로그인 화면 | 올바른 로그인과 사용자 namespace 접근 권한 확인 |
-| Run 성공, 메트릭 안 보임 | evaluate의 metrics metadata·report JSON·로그 확인 후 CSV 비교 사용 |
+| Run 성공, 메트릭 안 보임 | UI에서 evaluate의 metrics 아티팩트 metadata 및 Logs 탭 확인 |
 | accuracy 값이 동일함 | 정상일 수 있음. 혼동행렬·모델 크기도 함께 비교 |
 | 학습이 너무 느림 | fit 시간과 전체 Duration 구분. 보통 패키지 설치·Pod 시작 비용 확인 |
 
@@ -616,7 +688,7 @@ def preprocess():  # 실제 적용 시 기존 함수의 인자와 본문 유지
 
 1. `iris_pipeline.py`, `iris_pipeline.yaml`
 2. A·B·C Run의 완료 화면 또는 실행 식별 정보
-3. Run 비교표 또는 `run_comparison.csv`
+3. Experiment의 Run 비교 화면 캡처와 작성한 Run 비교표
 4. 다음 질문에 대한 짧은 답변
 
 점검 질문:
@@ -654,4 +726,4 @@ def preprocess():  # 실제 적용 시 기존 함수의 인자와 본문 유지
 - [RandomForestClassifier](https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.RandomForestClassifier.html)
 - [데이터 누수와 전처리 주의사항](https://scikit-learn.org/stable/common_pitfalls.html)
 
-검증 범위: KFP SDK 2.5.0으로 YAML 컴파일 성공, 전처리·학습·평가 함수 로직의 로컬 실행 및 A·B·C·D 성능 값 확인. 실제 사용자의 Kubeflow 클러스터에 제출·실행한 검증은 수행하지 않음.
+검증 범위: 기존 예제는 사용자 환경에서 파이프라인 실행 성공 확인됨. 개정 코드의 Python 구문을 검증함. 함수 로직은 기존 컴파일·실행 성공 예제를 유지하고 설명 주석을 추가함. 이번 개정의 재컴파일은 검증 환경의 패키지 설치 제한으로 수행하지 못함. 개정본을 사용자 클러스터에 직접 제출한 검증은 수행하지 않음.
